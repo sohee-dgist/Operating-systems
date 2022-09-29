@@ -1,0 +1,8 @@
+• Explain why the number of context switches increases at a different rate when delays are added in 1-2 sentences (English/Korean)
+
+swtchtest.c에 sleep(10) 이 있는데 process가 Sleep상태로 들어가게 되면 그 즉시 Cpu 점유 권한을 놓게 되기 때문에 Context Switching이 강제로 발생하게 됩니다.
+그렇기 때문에 Contextswitching이 undelayed 상태일때보다 많이 들어가는것이 아닐까 싶습니다.
+
+• Explain the purpose of myproc() function in relation to the PCB in 1-2 sentences (English/Korean)
+
+myproc() 함수는 cpu 구조체에서 proc 정보를 읽어오며 그동안 Context switching이 일어나지 않도록 인터럽트를 비활성화 시키는 함수입니다.

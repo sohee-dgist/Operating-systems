@@ -1,0 +1,473 @@
+diff --git a/Makefile b/Makefile
+index 655384c..cb315b4 100644
+--- a/Makefile
++++ b/Makefile
+@@ -181,6 +181,12 @@ UPROGS=\
+ 	_usertests\
+ 	_wc\
+ 	_zombie\
++	_bench1\
++	_bench2\
++	_bench3\
++	_bench4\
++	_bench5\
++	_bench6\
+ 
+ fs.img: mkfs README $(UPROGS)
+ 	./mkfs fs.img README $(UPROGS)
+diff --git a/param.h b/param.h
+index a7e90ef..74fce0b 100644
+--- a/param.h
++++ b/param.h
+@@ -1,7 +1,7 @@
+ #define NPROC        64  // maximum number of processes
+ #define KSTACKSIZE 4096  // size of per-process kernel stack
+ #define NCPU          8  // maximum number of CPUs
+-#define NOFILE       16  // open files per process
++#define NOFILE       32  // open files per process
+ #define NFILE       100  // open files per system
+ #define NINODE       50  // maximum number of active i-nodes
+ #define NDEV         10  // maximum major device number
+diff --git a/proc.c b/proc.c
+index 806b1b1..7d06422 100644
+--- a/proc.c
++++ b/proc.c
+@@ -6,6 +6,10 @@
+ #include "x86.h"
+ #include "proc.h"
+ #include "spinlock.h"
++#include <stddef.h>
++//for debug
++//#define DEBUG
++//#define DEBUG2 //for fair alg
+ 
+ struct {
+   struct spinlock lock;
+@@ -14,6 +18,24 @@ struct {
+ 
+ static struct proc *initproc;
+ 
++//write here
++struct pstat pst;
++
++struct proc* top_queue[1000];
++struct proc* middle_queue[1000];
++struct proc* bottom_queue[1000];
++int top_num = 0;
++int middle_num = 0;
++int bottom_num = 0;
++
++struct proc* top_queue_runed[1000];
++struct proc* middle_queue_runed[1000];
++struct proc* bottom_queue_runed[1000];
++int top_num_run = 0;
++int middle_num_run = 0;
++int bottom_num_run = 0;
++//write here
++
+ int nextpid = 1;
+ extern void forkret(void);
+ extern void trapret(void);
+@@ -77,10 +99,28 @@ allocproc(void)
+   char *sp;
+ 
+   acquire(&ptable.lock);
+-
+   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++)
+     if(p->state == UNUSED)
+       goto found;
++  
++  //write here
++  p->run_ticks = 0;
++  //write here
++  //cprintf("%d'th proces made\n\n",p->pid);
++  p->dead = 0;
++  top_queue[top_num] = p;
++  pst.inuse[p->pid] = 1;
++  pst.pid[p->pid] = p->pid;
++  pst.priority[p->pid] = 0;
++  pst.state[p->pid] = p->state;
++  pst.ticks[p->pid][0] = 0;
++  pst.ticks[p->pid][1] = 0;
++  pst.ticks[p->pid][2] = 0;
++  pst.wait_ticks[p->pid][0] = 0;
++  pst.wait_ticks[p->pid][1] = 0;
++  pst.wait_ticks[p->pid][2] = 0;
++  top_num++;
++  //write here
+ 
+   release(&ptable.lock);
+   return 0;
+@@ -88,7 +128,26 @@ allocproc(void)
+ found:
+   p->state = EMBRYO;
+   p->pid = nextpid++;
+-
++  p->run_ticks = 0;
++  //write here
++#ifdef DEBUG
++  cprintf("\n\n%d'th proces made name \n\n",p->pid);
++#endif
++  p->dead = 0;
++  top_queue[top_num] = p;
++  pst.inuse[p->pid] = 1;
++  pst.pid[p->pid] = p->pid;
++  pst.priority[p->pid] = 0;
++  pst.state[p->pid] = p->state;
++  pst.ticks[p->pid][0] = 0;
++  pst.ticks[p->pid][1] = 0;
++  pst.ticks[p->pid][2] = 0;
++  pst.wait_ticks[p->pid][0] = 0;
++  pst.wait_ticks[p->pid][1] = 0;
++  pst.wait_ticks[p->pid][2] = 0;
++  top_num++;
++  //write here
++  
+   release(&ptable.lock);
+ 
+   // Allocate kernel stack.
+@@ -230,6 +289,9 @@ exit(void)
+   struct proc *curproc = myproc();
+   struct proc *p;
+   int fd;
++#ifdef DEBUG
++  cprintf("\n%d exited\n",myproc()->pid);
++#endif
+ 
+   if(curproc == initproc)
+     panic("init exiting");
+@@ -241,6 +303,7 @@ exit(void)
+       curproc->ofile[fd] = 0;
+     }
+   }
++  
+ 
+   begin_op();
+   iput(curproc->cwd);
+@@ -263,6 +326,7 @@ exit(void)
+ 
+   // Jump into the scheduler, never to return.
+   curproc->state = ZOMBIE;
++  curproc->dead = 1;
+   sched();
+   panic("zombie exit");
+ }
+@@ -325,33 +389,212 @@ scheduler(void)
+   struct proc *p;
+   struct cpu *c = mycpu();
+   c->proc = 0;
+-  
++
+   for(;;){
+-    // Enable interrupts on this processor.
+     sti();
+-
+-    // Loop over process table looking for process to run.
+     acquire(&ptable.lock);
+-    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
++ENTRY:
++#ifdef DEBUG2
++    for(int i = 0;i<top_num; i++){
++      p = top_queue[i];
++      if(!(p!=0))
++        continue;
+       if(p->state != RUNNABLE)
+         continue;
+-
+-      // Switch to chosen process.  It is the process's job
+-      // to release ptable.lock and then reacquire it
+-      // before jumping back to us.
+-      c->proc = p;
++      if(p->parent == NULL)
++        continue;
++      if(p->parent->pid != 2)
++        continue;
++      //cprintf("\n %d is benchmark \n",p->pid);
++      c-> proc = p;
+       switchuvm(p);
+       p->state = RUNNING;
+-
+       swtch(&(c->scheduler), p->context);
+       switchkvm();
++      goto END;
++    }
++#endif
++    //
++    if(top_num>0){
++      for(int i = 0;i<top_num; i++){
++        p = top_queue[i];
++        if(!(p!=0))
++          continue;
++        if(p->dead==1){
++          for(int j=i;j<top_num-1;j++){
++            top_queue[j] = top_queue[j+1];
++          }
++          top_num--;
++          continue;
++        }
++        if(p->state != RUNNABLE)
++          continue;
++        //fiar algorithm needed
++#ifdef DEBUG
++        cprintf("\n %d priority 0, ticks %d \n",p->pid,pst.ticks[p->pid][0]);
++#endif
++        c-> proc = p;
++        switchuvm(p);
++        p->state = RUNNING;
++        p->run_ticks++;
++        pst.ticks[p->pid][0]++;
++        swtch(&(c->scheduler), p->context);
++        switchkvm();
++        if(pst.ticks[p->pid][0]==1){
++          //cprintf("priority 0->1 downed\n");
++          pst.priority[p->pid]++;
++          middle_queue[middle_num] = p;
++          middle_num++;
++          for(int j=i;j<top_num-1;j++){
++            top_queue[j] = top_queue[j+1];
++          }
++          top_num--;
++        }
++        else{
++          //cprintf("priority 0 runed \n");
++          pst.ticks[p->pid][0] = 0;
++          p->run_ticks = 0;
++          top_queue_runed[top_num_run] = p;
++          top_num_run++;
++          for(int j=i;j<top_num-1;j++){
++            top_queue[j] = top_queue[j+1];
++          }
++          p->run_ticks = 0;
++          top_num--;
++        }
++        c->proc = 0;
++        goto END;
++      }
++    }
+ 
+-      // Process is done running for now.
+-      // It should have changed its p->state before coming back.
+-      c->proc = 0;
++    if(top_num_run>0){
++      for(int i = 0;i<top_num_run;i++){
++        top_queue[top_num] = top_queue_runed[i];
++        top_num++;
++      }
++      top_num_run = 0;
++      goto ENTRY;
+     }
+-    release(&ptable.lock);
+ 
++    //cprintf("tick2\n");
++    //write here
++    if(middle_num>0){
++      for(int i = 0;i<middle_num; i++){
++        p = middle_queue[i];
++        if(!(p!=0))
++          continue;
++        if(p->dead == 1){
++          for(int j=i;j<middle_num-1;j++){
++            middle_queue[j] = middle_queue[j+1];
++          }
++          middle_num--;
++          continue;
++        }
++        if(p->state != RUNNABLE){
++          continue;
++        }
++#ifdef DEBUG
++        cprintf("\n %d priority 1, ticks %d\n",p->pid,pst.ticks[p->pid][1]);
++#endif
++        //fiar algorithm needed
++        c-> proc = p;
++        switchuvm(p);
++        p->state = RUNNING;
++        pst.ticks[p->pid][1]++;
++        p->run_ticks++;
++        swtch(&(c->scheduler), p->context);
++        switchkvm();
++        if(pst.ticks[p->pid][1]==4){
++          //cprintf("priority 1->2 downed\n");
++          pst.priority[p->pid]++;
++          bottom_queue[bottom_num] = p;
++          bottom_num++;
++          for(int j=i;j<middle_num-1;j++){
++            middle_queue[j] = middle_queue[j+1];
++          }
++          middle_num--;
++        }
++        else if (p->run_ticks == 4){
++          //cprintf("priority 1->1 runned\n");
++          pst.ticks[p->pid][1] = 0;
++          p->run_ticks = 0;
++          middle_queue_runed[middle_num_run] = p;
++          middle_num_run++;
++          for(int j=i;j<middle_num-1;j++){
++            middle_queue[j] = middle_queue[j+1];
++          }
++          middle_num--;
++        }
++        c->proc = 0;
++        goto END;
++      }
++    }
++    //cprintf("\ntick2-2\n");
++    if(middle_num_run>0){
++      for(int i = 0;i<middle_num_run;i++){
++        middle_queue[middle_num] = middle_queue_runed[i];
++        middle_num++;
++      }
++      middle_num_run = 0;
++      goto ENTRY;
++    }
++    //cprintf("\ntick3\n");
++    //write here
++    if(bottom_num>0){
++      for(int i = 0;i<bottom_num; i++){
++        p = bottom_queue[i];
++        if(!(p!=0))
++          continue;
++        if(p->dead == 1){
++          for(int j=i;j<bottom_num-1;j++){
++            bottom_queue[j] = bottom_queue[j+1];
++          }
++          bottom_num--;
++          continue;
++        }
++        if(p->state != RUNNABLE){
++          continue;
++        }
++        //fiar algorithm needed
++#ifdef DEBUG
++        cprintf("\n %d priority 2, ticks %d\n",p->pid,pst.ticks[p->pid][2]);
++#endif
++        c-> proc = p;
++        switchuvm(p);
++        p->state = RUNNING;
++        pst.ticks[p->pid][2]++;
++        p->run_ticks++;
++        swtch(&(c->scheduler), p->context);
++        switchkvm();
++        //cprintf("pid is %d,priority 3 ended\n",p->pid);
++        //cprintf("p->run_tick is %d\n",p->run_ticks);
++        if (p->run_ticks == 16){
++          pst.ticks[p->pid][2] = 0;
++          p->run_ticks = 0;
++          bottom_queue_runed[bottom_num_run] = p;
++          bottom_num_run++;
++          for(int j=i;j<bottom_num-1;j++){
++            bottom_queue[j] = bottom_queue[j+1];
++          }
++          bottom_num--;
++        }
++        c->proc = 0;
++        goto END;
++      }
++    }
++    if(bottom_num_run>0){
++      for(int i = 0;i<bottom_num_run;i++){
++        bottom_queue[bottom_num] = bottom_queue_runed[i];
++        bottom_num++;
++      }
++      bottom_num_run = 0;
++      goto ENTRY;
++    }
++    //write here
++    //cprintf("tick_ended_with_nothing\n");
++
++END:
++    release(&ptable.lock);
+   }
+ }
+ 
+@@ -385,8 +628,14 @@ sched(void)
+ void
+ yield(void)
+ {
++  //cprintf("yeild\n");
+   acquire(&ptable.lock);  //DOC: yieldlock
+   myproc()->state = RUNNABLE;
++  //write here
++  //int priority = pst.priority[myproc()->pid];
++  //pst.ticks[myproc()->pid][priority] = 0;
++  //write here
++  //cprintf("yeild end\n");
+   sched();
+   release(&ptable.lock);
+ }
+@@ -438,7 +687,8 @@ sleep(void *chan, struct spinlock *lk)
+   // Go to sleep.
+   p->chan = chan;
+   p->state = SLEEPING;
+-
++  //int priority = pst.priority[myproc()->pid];
++  //pst.ticks[myproc()->pid][priority] = 0;
+   sched();
+ 
+   // Tidy up.
+@@ -460,8 +710,11 @@ wakeup1(void *chan)
+   struct proc *p;
+ 
+   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++)
+-    if(p->state == SLEEPING && p->chan == chan)
++    if(p->state == SLEEPING && p->chan == chan){
++      int priority = pst.priority[p->pid];
++      pst.ticks[p->pid][priority] = 0;
+       p->state = RUNNABLE;
++    }
+ }
+ 
+ // Wake up all processes sleeping on chan.
+diff --git a/proc.h b/proc.h
+index ae23433..7e5e996 100644
+--- a/proc.h
++++ b/proc.h
+@@ -12,6 +12,7 @@ struct cpu {
+ 
+ extern struct cpu cpus[NCPU];
+ extern int ncpu;
++extern struct pstat pst;
+ 
+ //PAGEBREAK: 17
+ // Saved registers for kernel context switches.
+@@ -49,7 +50,9 @@ struct proc {
+   struct file *ofile[NOFILE];  // Open files
+   struct inode *cwd;           // Current directory
+   char name[16];               // Process name (debugging)
+-  struct pstat *pst;
++  //struct pstat *pst;
++  int run_ticks;
++  int dead;
+ };
+ 
+ // Process memory is laid out contiguously, low addresses first:
+diff --git a/sysproc.c b/sysproc.c
+index 7085759..55b10b8 100644
+--- a/sysproc.c
++++ b/sysproc.c
+@@ -95,19 +95,17 @@ sys_getpstat(void)
+ {
+ 	int i, j;
+ 	struct pstat *stat;
+-	struct pstat *pst;
+ 	if (argptr(0, (void*)&stat, sizeof(*stat))<0)
+ 		return -1;
+ 
+-	pst = myproc()->pst;
+ 	for (i=0; i<NPROC; i++) {
+-		stat->inuse[i] = pst->inuse[i];
+-		stat->pid[i] = pst->pid[i];
+-		stat->priority[i] = pst->priority[i];
+-		stat->state[i] = pst->state[i];
++		stat->inuse[i] = pst.inuse[i];
++		stat->pid[i] = pst.pid[i];
++		stat->priority[i] = pst.priority[i];
++		stat->state[i] = pst.state[i];
+ 		for (j=0; j<3; j++) {
+-			stat->ticks[i][j] = pst->ticks[i][j];
+-			stat->wait_ticks[i][j] = pst->wait_ticks[i][j];
++			stat->ticks[i][j] = pst.ticks[i][j];
++			stat->wait_ticks[i][j] = pst.wait_ticks[i][j];
+ 		}
+ 	}
+ 	return 0;

@@ -1,0 +1,116 @@
+diff --git a/proc.c b/proc.c
+index d866ae8..f6e38f1 100644
+--- a/proc.c
++++ b/proc.c
+@@ -293,6 +293,9 @@ wait(void)
+         kfree(p->kstack);
+         p->kstack = 0;
+         freevm(p->pgdir);
++        //if(p->shadow_pgdir != 0){
++        //  freevm(p->shadow_pgdir);
++        //}
+         p->pid = 0;
+         p->parent = 0;
+         p->name[0] = 0;
+diff --git a/usertests.c b/usertests.c
+index 8c0075f..5042374 100644
+--- a/usertests.c
++++ b/usertests.c
+@@ -1493,8 +1493,7 @@ sbrktest(void)
+     printf(stdout, "sbrk downsize failed, a %x c %x\n", a, c);
+     exit();
+   }
+-
+-/*
++  /*
+   // can we read the kernel's memory?
+   for(a = (char*)(KERNBASE); a < (char*) (KERNBASE+2000000); a += 50000){
+     ppid = getpid();
+@@ -1510,8 +1509,8 @@ sbrktest(void)
+     }
+     wait();
+   }
+-*/
+-
++  */
++  
+   // if we run the system out of memory, does it clean up the last
+   // failed allocation?
+   if(pipe(fds) != 0){
+diff --git a/vm.c b/vm.c
+index 7d2fe8e..a2a3ee4 100644
+--- a/vm.c
++++ b/vm.c
+@@ -7,6 +7,7 @@
+ #include "proc.h"
+ #include "elf.h"
+ 
++
+ extern char data[];  // defined by kernel.ld
+ pde_t *kpgdir;  // for use in scheduler()
+ 
+@@ -173,7 +174,7 @@ switchuvm(struct proc *p)
+   // forbids I/O instructions (e.g., inb and outb) from user space
+   mycpu()->ts.iomb = (ushort) 0xFFFF;
+   ltr(SEG_TSS << 3);
+-  lcr3(V2P(p->pgdir));  // switch to process's address space
++  lcr3(V2P(p->shadow_pgdir));  // switch to process's address space
+   popcli();
+ }
+ 
+@@ -418,13 +419,17 @@ static uint virt_to_phys(const char *log, pde_t *pgdir, struct proc *proc, uint
+   return pa;
+ }
+ 
++
+ void pagefault(void)
+ {
+   struct proc *proc;
+   pde_t *pde;
+   pte_t *pgtab;
+   uint va;
+-
++  uint va2;
++  uint pa,i,flags;
++  pte_t *pte1;
++  pte_t *pte2;
+   clprintf("pagefault++\n");
+ 
+   proc = myproc();
+@@ -436,9 +441,21 @@ void pagefault(void)
+   // Print stock pgdir's translation result
+   virt_to_phys("pgdir", proc->pgdir, proc, va);
+ 
++
+   // Map pgdir's page address to shadow_pgdir's page table
+   // XXX
+ 
++  // find inpormation
++  
++  pte1 = walkpgdir(proc->pgdir, (void*)va, 0);
++  pa = PTE_ADDR(*pte1);
++  flags = PTE_FLAGS(*pte1);
++  pte2 = walkpgdir(proc->shadow_pgdir, (void*)va, 1);
++  *pte2 = pa | flags | PTE_P;
++
++  // XXX
++  clprintf("Allocated page table at 0x%x\n",proc->shadow_pgdir);
++
+   /*
+    * Print shadow pgdir's translation result,
+    * this should match with stock pgdir's translation result above!
+@@ -448,11 +465,13 @@ void pagefault(void)
+   proc->page_faults++;
+ 
+   // Load a bogus pgdir to force a TLB flush
+-  lcr3(V2P(something));
++  lcr3(V2P(proc->shadow_pgdir));
+   // Switch to our shadow pgdir
+   lcr3(V2P(proc->shadow_pgdir));
+ 
+   clprintf("pagefault--\n");
++  proc->page_faults--;
++
+ }
+ 
+ //PAGEBREAK!

@@ -1,0 +1,601 @@
+diff --git a/Makefile b/Makefile
+index 153526e..484e2ab 100644
+--- a/Makefile
++++ b/Makefile
+@@ -168,6 +168,7 @@ mkfs: mkfs.c fs.h
+ 
+ UPROGS=\
+ 	_cat\
++	_secondtest\
+ 	_echo\
+ 	_forktest\
+ 	_grep\
+@@ -250,7 +251,7 @@ qemu-nox-gdb: fs.img xv6.img .gdbinit
+ 
+ EXTRA=\
+ 	mkfs.c ulib.c user.h cat.c echo.c forktest.c grep.c kill.c\
+-	ln.c ls.c mkdir.c rm.c stressfs.c usertests.c wc.c zombie.c\
++	ln.c ls.c mkdir.c rm.c stressfs.c usertests.c wc.c zombie.c secondtest.c\
+ 	printf.c umalloc.c\
+ 	README dot-bochsrc *.pl toc.* runoff runoff1 runoff.list\
+ 	.gdbinit.tmpl gdbutil\
+diff --git a/defs.h b/defs.h
+index 9b6315d..dd12899 100644
+--- a/defs.h
++++ b/defs.h
+@@ -120,6 +120,7 @@ void            userinit(void);
+ int             wait(void);
+ void            wakeup(void*);
+ void            yield(void);
++void            pvminfo(void);
+ 
+ // swtch.S
+ void            swtch(struct context**, struct context*);
+@@ -173,7 +174,7 @@ void            uartputc(int);
+ // vm.c
+ void            seginit(void);
+ void            kvmalloc(void);
+-pde_t*          setupkvm(void);
++pde_t*          setupkvm(int);
+ char*           uva2ka(pde_t*, char*);
+ int             allocuvm(pde_t*, uint, uint);
+ int             deallocuvm(pde_t*, uint, uint);
+@@ -186,6 +187,7 @@ void            switchkvm(void);
+ int             copyout(pde_t*, uint, void*, uint);
+ void            clearpteu(pde_t *pgdir, char *uva);
+ void            pagefault(void);
++void            printvm(pde_t *pgdir);
+ 
+ // number of elements in fixed-size array
+ #define NELEM(x) (sizeof(x)/sizeof((x)[0]))
+diff --git a/exec.c b/exec.c
+index 98a2946..5d7cef2 100644
+--- a/exec.c
++++ b/exec.c
+@@ -35,7 +35,7 @@ exec(char *path, char **argv)
+   if(elf.magic != ELF_MAGIC)
+     goto bad;
+ 
+-  if((pgdir = setupkvm()) == 0)
++  if((pgdir = setupkvm(0)) == 0)
+     goto bad;
+ 
+   // Load program into memory.
+@@ -96,7 +96,7 @@ exec(char *path, char **argv)
+   // Commit to the user image.
+   oldpgdir = curproc->pgdir;
+   curproc->pgdir = pgdir;
+-  curproc->shadow_pgdir = setupkvm();
++  curproc->shadow_pgdir = setupkvm(1);
+   curproc->sz = sz;
+   curproc->tf->eip = elf.entry;  // main
+   curproc->tf->esp = sp;
+diff --git a/mmu.h b/mmu.h
+index 1e01fb5..b53edb7 100644
+--- a/mmu.h
++++ b/mmu.h
+@@ -62,6 +62,26 @@ struct segdesc {
+ #define STS_IG32    0xE     // 32-bit Interrupt Gate
+ #define STS_TG32    0xF     // 32-bit Trap Gate
+ 
++// For My assignment...
++//
++// +--------5-------+--------5-------+-------10-------+---------12----------+
++// | Page Directory | Page Directory |   Page Table   | Offset within Page  |
++// |      Index     |      Index     |      Index     |                     |
++// +----------------+----------------+----------------+---------------------+
++//  \--- PDX1(va)--/ \--- PDX2(va)---/\--- PTX(va)---/
++
++// we also use, PTX(va) OWP(va), flags noramlly
++
++#define PD1X(va)         (((uint)(va) >> PD1XSHIFT) & 0x1F)
++#define PD2X(va)         (((uint)(va) >> PD2XSHIFT) & 0x1F)
++#define PG1ADDR(pde)     ((uint)(pde) & ~0xFFF)
++#define PG2ADDR(pde)     ((uint)(pde) & ~0xFFF)
++#define PD1XSHIFT        27
++#define PD2XSHIFT        22
++
++#define PG12ADDR(d1, d2, t, o) ((uint)((d1) << PD1XSHIFT | (d2) << PD2XSHIFT | (t) << PTXSHIFT | (o)))
++
++
+ // A virtual address 'la' has a three-part structure as follows:
+ //
+ // +--------10------+-------10-------+---------12----------+
+diff --git a/proc.c b/proc.c
+index f6e38f1..119dac7 100644
+--- a/proc.c
++++ b/proc.c
+@@ -125,11 +125,10 @@ userinit(void)
+   extern char _binary_initcode_start[], _binary_initcode_size[];
+ 
+   p = allocproc();
+-  
+   initproc = p;
+-  if((p->pgdir = setupkvm()) == 0)
++  if((p->pgdir = setupkvm(0)) == 0)
+     panic("userinit: out of memory?");
+-  p->shadow_pgdir = setupkvm();
++  p->shadow_pgdir = setupkvm(1);
+   inituvm(p->pgdir, _binary_initcode_start, (int)_binary_initcode_size);
+   p->sz = PGSIZE;
+   memset(p->tf, 0, sizeof(*p->tf));
+@@ -198,7 +197,7 @@ fork(void)
+     np->state = UNUSED;
+     return -1;
+   }
+-  np->shadow_pgdir = setupkvm();
++  np->shadow_pgdir = setupkvm(1);
+   np->sz = curproc->sz;
+   np->parent = curproc;
+   *np->tf = *curproc->tf;
+@@ -224,6 +223,16 @@ fork(void)
+   return pid;
+ }
+ 
++void pvminfo(void){
++  pde_t *ppgdir;
++  struct proc *curproc = myproc();
++  int cur_pid = curproc->pid;
++  ppgdir = curproc->pgdir;
++  lcr3(V2P(curproc->shadow_pgdir));
++  cprintf("current pid: %d\n", cur_pid);
++  printvm(ppgdir);
++}
++
+ // Exit the current process.  Does not return.
+ // An exited process remains in the zombie state
+ // until its parent calls wait() to find out it exited.
+diff --git a/syscall.c b/syscall.c
+index ee85261..2baa1f4 100644
+--- a/syscall.c
++++ b/syscall.c
+@@ -103,6 +103,7 @@ extern int sys_unlink(void);
+ extern int sys_wait(void);
+ extern int sys_write(void);
+ extern int sys_uptime(void);
++extern int sys_pvminfo(void);
+ 
+ static int (*syscalls[])(void) = {
+ [SYS_fork]    sys_fork,
+@@ -126,6 +127,7 @@ static int (*syscalls[])(void) = {
+ [SYS_link]    sys_link,
+ [SYS_mkdir]   sys_mkdir,
+ [SYS_close]   sys_close,
++[SYS_pvminfo] sys_pvminfo,
+ };
+ 
+ void
+diff --git a/syscall.h b/syscall.h
+index bc5f356..c9893df 100644
+--- a/syscall.h
++++ b/syscall.h
+@@ -20,3 +20,4 @@
+ #define SYS_link   19
+ #define SYS_mkdir  20
+ #define SYS_close  21
++#define SYS_pvminfo 22
+diff --git a/sysproc.c b/sysproc.c
+index 0686d29..0ee1726 100644
+--- a/sysproc.c
++++ b/sysproc.c
+@@ -89,3 +89,9 @@ sys_uptime(void)
+   release(&tickslock);
+   return xticks;
+ }
++
++int sys_pvminfo(void)
++{
++pvminfo();
++return 0;
++}
+diff --git a/user.h b/user.h
+index 4f99c52..a3f123f 100644
+--- a/user.h
++++ b/user.h
+@@ -23,6 +23,7 @@ int getpid(void);
+ char* sbrk(int);
+ int sleep(int);
+ int uptime(void);
++int pvminfo(void);
+ 
+ // ulib.c
+ int stat(const char*, struct stat*);
+diff --git a/usys.S b/usys.S
+index 8bfd8a1..cceaa85 100644
+--- a/usys.S
++++ b/usys.S
+@@ -29,3 +29,4 @@ SYSCALL(getpid)
+ SYSCALL(sbrk)
+ SYSCALL(sleep)
+ SYSCALL(uptime)
++SYSCALL(pvminfo)
+diff --git a/vm.c b/vm.c
+index a2a3ee4..589fbae 100644
+--- a/vm.c
++++ b/vm.c
+@@ -7,7 +7,7 @@
+ #include "proc.h"
+ #include "elf.h"
+ 
+-
++pde_t *emptypgdir;
+ extern char data[];  // defined by kernel.ld
+ pde_t *kpgdir;  // for use in scheduler()
+ 
+@@ -30,12 +30,97 @@ seginit(void)
+   lgdt(c->gdt, sizeof(c->gdt));
+ }
+ 
++
++void
++printvm(pde_t *pgdir)
++{
++  pde_t *pde;
++  pde_t *pgtab;
++  pde_t *pgtab2;
++  pde_t *pde2;
++  pde_t *pte;
++  cprintf("Page directory VA: 0x%x \n",pgdir);
++  uint i;
++  uint j;
++  uint k;
++
++  for(i = 0; i < 16 ; i++){
++    pde = &pgdir[i];
++    if ((*pde & 0x005) ==  0x005 ){
++      cprintf("---%d: PDE1: 0x%x PA: 0x%x \n",i,*pde,PTE_ADDR(pgdir));
++      pgtab = (pde_t*)P2V(PTE_ADDR(*pde));
++      for(j = 0; j < 32 ; j++){
++        pde2 = &pgtab[j];
++        if ((*pde2 & 0x005) == 0x005 ){
++          cprintf("------%d: PDE2: 0x%x PA: 0x%x \n",j,*pde2,PTE_ADDR(*pde));
++          pgtab2 = (pde_t*)P2V(PTE_ADDR(*pde2));
++          for(k = 0; k < NPDENTRIES; k++){
++            pte = &pgtab2[k];
++            if((*pte & 0x005) == 0x005 ){
++              cprintf("--------%d: PTE: 0x%x PA: 0x%x \n",j,*pte,PTE_ADDR(*pde2));
++            }
++          }
++        }
++      }
++    }
++  }
++}
++
+ // Return the address of the PTE in page table pgdir
+ // that corresponds to virtual address va.  If alloc!=0,
+ // create any required page table pages.
+ static pte_t *
+-walkpgdir(pde_t *pgdir, const void *va, int alloc)
++walkpgdir(pde_t *pgdir1, const void *va, int alloc)
++{
++  //cprintf("walkpgdir_called\n");
++  pde_t *pde;
++
++  pde_t *pde2;
++  pde_t *pgdir2;
++
++  pte_t *pgtab;
++
++  //step 1
++  pde = &pgdir1[PD1X(va)];
++
++  if(*pde & PTE_P){
++    pgdir2 = (pde_t*)P2V(PG1ADDR(*pde));
++  } else {
++    if(!alloc || (pgdir2 = (pde_t*)kalloc()) == 0)
++      return 0;
++    // Make sure all those PTE_P bits are zero.
++    memset(pgdir2, 0, PGSIZE);
++    // The permissions here are overly generous, but they can
++    // be further restricted by the permissions in the page table
++    // entries, if necessary.
++    *pde = V2P(pgdir2) | PTE_P | PTE_W | PTE_U;
++  }
++
++  //cprintf("walkpgdir_1_allocated\n");
++  //step 2
++
++  pde2 = &pgdir2[PD2X(va)];
++
++  if(*pde2 & PTE_P){
++    pgtab = (pte_t*)P2V(PG2ADDR(*pde2));
++  } else {
++    if(!alloc || (pgtab = (pte_t*)kalloc()) == 0)
++      return 0;
++    // Make sure all those PTE_P bits are zero.
++    memset(pgtab, 0, PGSIZE);
++    // The permissions here are overly generous, but they can
++    // be further restricted by the permissions in the page table
++    // entries, if necessary.
++    *pde2 = V2P(pgtab) | PTE_P | PTE_W | PTE_U;
++  }
++
++  return &pgtab[PTX(va)];
++}
++
++static pte_t *
++k_walkpgdir(pde_t *pgdir, const void *va, int alloc)
+ {
++  //cprintf("k_walkpgdir_called\n");
+   pde_t *pde;
+   pte_t *pgtab;
+ 
+@@ -59,23 +144,44 @@ walkpgdir(pde_t *pgdir, const void *va, int alloc)
+ // physical addresses starting at pa. va and size might not
+ // be page-aligned.
+ static int
+-mappages(pde_t *pgdir, void *va, uint size, uint pa, int perm)
++mappages(pde_t *pgdir, void *va, uint size, uint pa, int perm, int is_kernel)
+ {
+   char *a, *last;
+   pte_t *pte;
+-
+-  a = (char*)PGROUNDDOWN((uint)va);
+-  last = (char*)PGROUNDDOWN(((uint)va) + size - 1);
+-  for(;;){
+-    if((pte = walkpgdir(pgdir, a, 1)) == 0)
+-      return -1;
+-    if(*pte & PTE_P)
+-      panic("remap");
+-    *pte = pa | perm | PTE_P;
+-    if(a == last)
+-      break;
+-    a += PGSIZE;
+-    pa += PGSIZE;
++  
++  //cprintf("mappages 0\n");
++  if(is_kernel == 1){
++      a = (char*)PGROUNDDOWN((uint)va);
++      last = (char*)PGROUNDDOWN(((uint)va) + size - 1);
++      for(;;){
++        if((pte = k_walkpgdir(pgdir, a, 1)) == 0)
++          return -1;
++        if(*pte & PTE_P)
++          panic("remap");
++        *pte = pa | perm | PTE_P;
++        if(a == last)
++          break;
++        a += PGSIZE;
++        pa += PGSIZE;
++      }
++      return 0;
++  }
++  if(is_kernel == 0){
++      a = (char*)PGROUNDDOWN((uint)va);
++      last = (char*)PGROUNDDOWN(((uint)va) + size - 1);
++      for(;;){
++        //cprintf("mappages 1\n");
++        if((pte = walkpgdir(pgdir, a, 1)) == 0)
++          return -1;
++        if(*pte & PTE_P)
++          panic("remap");
++        *pte = pa | perm | PTE_P;
++        if(a == last)
++          break;
++        a += PGSIZE;
++        pa += PGSIZE;
++      }
++      return 0;
+   }
+   return 0;
+ }
+@@ -116,32 +222,62 @@ static struct kmap {
+ };
+ 
+ // Set up kernel part of a page table.
+-pde_t*
+-setupkvm(void)
++pde_t *
++setupkvm(int is_kernel)
+ {
+-  pde_t *pgdir;
+-  struct kmap *k;
++  //cprintf("is kernel? %d\n",is_kernel);
++  if (is_kernel == 1) {
+ 
+-  if((pgdir = (pde_t*)kalloc()) == 0)
+-    return 0;
+-  memset(pgdir, 0, PGSIZE);
+-  if (P2V(PHYSTOP) > (void*)DEVSPACE)
+-    panic("PHYSTOP too high");
+-  for(k = kmap; k < &kmap[NELEM(kmap)]; k++)
+-    if(mappages(pgdir, k->virt, k->phys_end - k->phys_start,
+-                (uint)k->phys_start, k->perm) < 0) {
+-      freevm(pgdir);
++    pde_t *pgdir;
++    struct kmap *k;
++
++    if((pgdir = (pde_t*)kalloc()) == 0)
+       return 0;
++    memset(pgdir, 0, PGSIZE);
++    if (P2V(PHYSTOP) > (void*)DEVSPACE)
++      panic("PHYSTOP too high");
++    for(k = kmap; k < &kmap[NELEM(kmap)]; k++)
++      if(mappages(pgdir, k->virt, k->phys_end - k->phys_start,
++                  (uint)k->phys_start, k->perm, is_kernel) < 0) {
++        freevm(pgdir);
++        return 0;
++      }
++    return pgdir;
++  }
++
++  if (is_kernel == 0) {
++
++    pde_t *pgdir;
++    struct kmap *k;
++
++    //cprintf("is kernel1? %d\n",is_kernel);
++    if((pgdir = (pde_t*)kalloc()) == 0)
++      return 0;
++    //cprintf("is kernel2? %d\n",is_kernel);
++    memset(pgdir, 0, PGSIZE);
++    //cprintf("is kernel3? %d\n",is_kernel);
++    if (P2V(PHYSTOP) > (void*)DEVSPACE)
++      panic("PHYSTOP too high");
++    //cprintf("is kernel4? %d\n",is_kernel);
++    for(k = kmap; k < &kmap[NELEM(kmap)]; k++){
++      //cprintf("is kernel4? %d\n",is_kernel);
++      if(mappages(pgdir, k->virt, k->phys_end - k->phys_start,
++                  (uint)k->phys_start, k->perm, is_kernel) < 0) {
++        freevm(pgdir);
++        return 0;
++      }
+     }
+-  return pgdir;
++    return pgdir;
++  }
++  return 0;
+ }
+-
+ // Allocate one page table for the machine for the kernel address
+ // space for scheduler processes.
+ void
+ kvmalloc(void)
+ {
+-  kpgdir = setupkvm();
++  kpgdir = setupkvm(1);
++  emptypgdir = setupkvm(1);
+   switchkvm();
+ }
+ 
+@@ -157,6 +293,8 @@ switchkvm(void)
+ void
+ switchuvm(struct proc *p)
+ {
++  //cprintf("here?\n");
++
+   if(p == 0)
+     panic("switchuvm: no process");
+   if(p->kstack == 0)
+@@ -174,7 +312,9 @@ switchuvm(struct proc *p)
+   // forbids I/O instructions (e.g., inb and outb) from user space
+   mycpu()->ts.iomb = (ushort) 0xFFFF;
+   ltr(SEG_TSS << 3);
+-  lcr3(V2P(p->shadow_pgdir));  // switch to process's address space
++
++  lcr3(V2P(emptypgdir));  // switch to process's address space
++
+   popcli();
+ }
+ 
+@@ -189,7 +329,7 @@ inituvm(pde_t *pgdir, char *init, uint sz)
+     panic("inituvm: more than a page");
+   mem = kalloc();
+   memset(mem, 0, PGSIZE);
+-  mappages(pgdir, 0, PGSIZE, V2P(mem), PTE_W|PTE_U);
++  mappages(pgdir, 0, PGSIZE, V2P(mem), PTE_W|PTE_U, 0);
+   memmove(mem, init, sz);
+ }
+ 
+@@ -239,7 +379,7 @@ allocuvm(pde_t *pgdir, uint oldsz, uint newsz)
+       return 0;
+     }
+     memset(mem, 0, PGSIZE);
+-    if(mappages(pgdir, (char*)a, PGSIZE, V2P(mem), PTE_W|PTE_U) < 0){
++    if(mappages(pgdir, (char*)a, PGSIZE, V2P(mem), PTE_W|PTE_U, 0) < 0 ){
+       cprintf("allocuvm out of memory (2)\n");
+       deallocuvm(pgdir, newsz, oldsz);
+       kfree(mem);
+@@ -257,16 +397,24 @@ int
+ deallocuvm(pde_t *pgdir, uint oldsz, uint newsz)
+ {
+   pte_t *pte;
+-  uint a, pa;
++  pde_t *pde;
++  uint a, b, pa;
+ 
+   if(newsz >= oldsz)
+     return oldsz;
+-
+   a = PGROUNDUP(newsz);
+   for(; a  < oldsz; a += PGSIZE){
+     pte = walkpgdir(pgdir, (char*)a, 0);
+-    if(!pte)
+-      a = PGADDR(PDX(a) + 1, 0, 0) - PGSIZE;
++    if(!pte){
++      pde = &pgdir[PD1X(a)];
++      if((*pde & PTE_P) == 0){
++        a = PG12ADDR(PD1X(a)+1, 0, 0, 0) - PGSIZE;
++      }
++      else{
++        a = PG12ADDR(PD1X(a), PD2X(a)+1,0, 0) - PGSIZE;
++      }
++      //cprintf("0x%x\n",a);
++    }
+     else if((*pte & PTE_P) != 0){
+       pa = PTE_ADDR(*pte);
+       if(pa == 0)
+@@ -279,13 +427,18 @@ deallocuvm(pde_t *pgdir, uint oldsz, uint newsz)
+   return newsz;
+ }
+ 
++
+ // Free a page table and all the physical memory pages
+ // in the user part.
+ void
+ freevm(pde_t *pgdir)
+ {
++  //cprintf("here2\n");
+   uint i;
++  uint j;
++  pde_t *pgdir2;
+ 
++  /*
+   if(pgdir == 0)
+     panic("freevm: no pgdir");
+   deallocuvm(pgdir, KERNBASE, 0);
+@@ -296,6 +449,25 @@ freevm(pde_t *pgdir)
+     }
+   }
+   kfree((char*)pgdir);
++  */
++
++  if(pgdir == 0)
++    panic("freevm: no pgdir");
++  deallocuvm(pgdir, KERNBASE, 0);
++  for(i = 0; i < 32; i++){
++    if(pgdir[i] & PTE_P){
++      pgdir2 = (pde_t*)P2V(PG1ADDR(pgdir[i]));
++
++      for(j = 0; j < 32; j++){
++        if(pgdir2[j] & PTE_P){
++          char * v = P2V(PG2ADDR(pgdir2[j]));
++          kfree(v);
++        }
++      }
++      kfree((char*)P2V(PG1ADDR(pgdir[i])));
++    }
++  }
++  kfree((char*)pgdir);
+ }
+ 
+ // Clear PTE_U on a page. Used to create an inaccessible
+@@ -321,7 +493,7 @@ copyuvm(pde_t *pgdir, uint sz)
+   uint pa, i, flags;
+   char *mem;
+ 
+-  if((d = setupkvm()) == 0)
++  if((d = setupkvm(0)) == 0)
+     return 0;
+   for(i = 0; i < sz; i += PGSIZE){
+     if((pte = walkpgdir(pgdir, (void *) i, 0)) == 0)
+@@ -333,7 +505,7 @@ copyuvm(pde_t *pgdir, uint sz)
+     if((mem = kalloc()) == 0)
+       goto bad;
+     memmove(mem, (char*)P2V(pa), PGSIZE);
+-    if(mappages(d, (void*)i, PGSIZE, V2P(mem), flags) < 0) {
++    if(mappages(d, (void*)i, PGSIZE, V2P(mem), flags, 0) < 0) {
+       kfree(mem);
+       goto bad;
+     }
+@@ -450,7 +622,8 @@ void pagefault(void)
+   pte1 = walkpgdir(proc->pgdir, (void*)va, 0);
+   pa = PTE_ADDR(*pte1);
+   flags = PTE_FLAGS(*pte1);
+-  pte2 = walkpgdir(proc->shadow_pgdir, (void*)va, 1);
++
++  pte2 = k_walkpgdir(proc->shadow_pgdir, (void*)va, 1);
+   *pte2 = pa | flags | PTE_P;
+ 
+   // XXX
